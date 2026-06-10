@@ -1,76 +1,74 @@
 const puppeteer = require('puppeteer');
 
-// ==========================================
-// 1. ✏️ VARIABLES DE ENTORNO Y CONFIGURACIÓN
-// ==========================================
+const item = $input.first().json;
 
-const forceClickJS = async (frame, element) => {
-    await frame.evaluate(el => { el.scrollIntoView({ block: "center" }); el.click(); }, element);
+// ══════════════════════════════════════════════════════════════════
+// 🔍 FILTRO: Detectar si la fila debe saltarse
+// ══════════════════════════════════════════════════════════════════
+if (item._SKIP_ROW === true) {
+    console.log(`⏭️ Fila marcada para saltar: ${item._SKIP_REASON || 'Sin razón especificada'}`);
+    return [{ json: item }];
+}
+
+const WS_URL = item.wsUrl;
+const URL_ESPERADA = item.finalUrl;
+
+if (!WS_URL) throw new Error("⛔ No se encontró wsUrl en el input.");
+
+let screenshots = {};
+let step = 1;
+
+let descripcion = null;
+let panelEndoso = null;
+let fechaExp = null;
+let fechaIni = null;
+let fechaFin = null;
+
+const takeSnap = async (pg, name) => {
+    try {
+        await new Promise(r => setTimeout(r, 600));
+        const b64 = await pg.screenshot({ encoding: 'base64', fullPage: false });
+        const fileName = `${step.toString().padStart(2, '0')}_${name}.png`;
+        screenshots[fileName] = {
+            data: b64,
+            mimeType: 'image/png',
+            fileName
+        };
+        step++;
+        console.log(`📸 ${fileName}`);
+    } catch (e) {
+        console.log(`⚠️ Screenshot error: ${e.message}`);
+    }
 };
 
+// =================================================================
+// ⚙️ FUNCIÓN PRINCIPAL (RUN)
+// =================================================================
 async function run() {
-    const item = $input.first().json;
-
-    // ✅ Reconectar al browser que dejó abierto el Nodo 1
-    const wsUrl = item.wsUrl;
-    const finalUrl = item.finalUrl;
-
-    if (!wsUrl) throw new Error("⛔ No se encontró wsUrl en el input. ¿Viene del Nodo 1?");
-
-    let browser;
-    let popupPage;
-    let screenshots = {};
-
-    let descripcion = null;
-    let panelEndoso = null;
-    let fechaExp = null;
-    let fechaIni = null;
-    let fechaFin = null;
-
-    // ⏱️ Timeout global de 3 minutos
-    const timeoutId = setTimeout(() => {
-        if (browser) {
-            console.error("⏱️ TIMEOUT: Cerrando browser después de 3 minutos");
-            browser.close().catch(() => { });
-        }
-    }, 180000);
-
-    const takeSnap = async (name) => {
-        if (!popupPage) return;
-        try {
-            const shot = await popupPage.screenshot({
-                encoding: 'base64',
-                fullPage: false,
-                type: 'jpeg',
-                quality: 80
-            });
-            screenshots[`${Object.keys(screenshots).length + 1}.${name}`] = {
-                data: shot, mimeType: 'image/jpeg', fileName: `${name}.jpg`
-            };
-        } catch (e) { console.log(`⚠️ Error capturando ${name}: ${e.message}`); }
-    };
+    let browser, targetPage = null;
 
     try {
-        // ✅ Reconectarse al browser existente (NO lanzar uno nuevo)
-        browser = await puppeteer.connect({ browserWSEndpoint: wsUrl });
-        console.log(`✅ Reconectado al browser: ${wsUrl}`);
+        browser = await puppeteer.connect({
+            browserWSEndpoint: WS_URL,
+            defaultViewport: null
+        });
 
-        // ✅ Recuperar la página que dejó abierta el Nodo 1
+        // ── 1. Encontrar la pestaña activa ──────────────────────────────────
+        console.log("🔍 Buscando pestaña activa...");
+
         const pages = await browser.pages();
-        popupPage = pages.find(p => p.url() === finalUrl) || pages[pages.length - 1];
-        await popupPage.bringToFront();
-        console.log(`✅ Página activa: ${popupPage.url()}`);
+        targetPage = pages.find(p => p.url() === URL_ESPERADA) || pages[pages.length - 1];
+        await targetPage.bringToFront();
+        await new Promise(r => setTimeout(r, 1500));
+        console.log(`✅ Conectado a: ${targetPage.url()}`);
 
-        await takeSnap('reconexion');
+        await takeSnap(targetPage, "00_Reconexion");
 
-        // ==========================================
-        // 2. Copiar Panel Endoso
-        // ==========================================
-
+        // ── 2. Copiar Panel Endoso ───────────────────────────────────────────
         console.log('📍 Leyendo Panel Endoso (endososPanel_header_content)');
 
         try {
-            await popupPage.waitForFunction(
+            await targetPage.waitForFunction(
                 () => {
                     const el = document.getElementById('endososPanel_header_content');
                     return el && el.innerText && el.innerText.trim().length > 0;
@@ -78,27 +76,24 @@ async function run() {
                 { timeout: 20000 }
             );
 
-            panelEndoso = await popupPage.evaluate(() => {
+            panelEndoso = await targetPage.evaluate(() => {
                 const el = document.getElementById('endososPanel_header_content');
                 return (el.value || el.innerText || el.textContent || '').trim();
             });
 
             console.log(`🎉 Panel Endoso obtenido: "${panelEndoso}"`);
-            await takeSnap('panel_endoso_ok');
+            await takeSnap(targetPage, '01_Panel_Endoso_OK');
 
         } catch (e) {
-            console.error(`❌ No se pudo leer endososPanel_header_content: ${e.message}`);
-            await takeSnap('panel_endoso_ERROR');
+            console.log(`⚠️ No se pudo leer endososPanel_header_content: ${e.message}`);
+            await takeSnap(targetPage, '02_Panel_Endoso_ERROR');
         }
 
-        // ==========================================
-        // 3. Leer tabla lstEndososPoliza
-        //    Buscar TODAS las filas con REHABILITACION DE POLIZA
-        //    y tomar la que tenga Fecha Expe. más cercana a hoy
-        // ==========================================
+        // ── 3. Leer tabla lstEndososPoliza ───────────────────────────────────
         console.log('📍 Leyendo tabla lstEndososPoliza');
+
         try {
-            await popupPage.waitForFunction(
+            await targetPage.waitForFunction(
                 () => {
                     const tabla = document.getElementById('lstEndososPoliza');
                     return tabla && tabla.rows && tabla.rows.length > 0;
@@ -106,7 +101,7 @@ async function run() {
                 { timeout: 20000 }
             );
 
-            const resultados = await popupPage.evaluate(() => {
+            const resultados = await targetPage.evaluate(() => {
                 const tabla = document.getElementById('lstEndososPoliza');
                 const coincidencias = [];
 
@@ -117,106 +112,96 @@ async function run() {
                     if (celdaDesc.innerText.trim() === "REHABILITACION DE POLIZA") {
                         coincidencias.push({
                             descripcion: tabla.rows[i].cells[3].innerText.trim(),
-                            fechaExp: tabla.rows[i].cells[4].innerText.trim(),
-                            fechaIni: tabla.rows[i].cells[5].innerText.trim(),
-                            fechaFin: tabla.rows[i].cells[6].innerText.trim()
+                            fechaExp:    tabla.rows[i].cells[4].innerText.trim(),
+                            fechaIni:    tabla.rows[i].cells[5].innerText.trim(),
+                            fechaFin:    tabla.rows[i].cells[6].innerText.trim()
                         });
                     }
                 }
 
                 if (coincidencias.length === 0) return null;
 
-                // Parsear fecha en formato DD/MM/YYYY → Date
                 const parseDate = (str) => {
                     const [day, month, year] = str.split('/');
                     return new Date(`${year}-${month}-${day}`);
                 };
 
                 const hoy = new Date();
-
-                // Ordenar por diferencia absoluta con hoy (menor diferencia = más cercana)
                 coincidencias.sort((a, b) => {
                     const diffA = Math.abs(hoy - parseDate(a.fechaExp));
                     const diffB = Math.abs(hoy - parseDate(b.fechaExp));
                     return diffA - diffB;
                 });
 
-                // Retornar la más cercana a la fecha actual
                 return coincidencias[0];
             });
 
             if (resultados) {
                 descripcion = resultados.descripcion;
-                fechaExp = resultados.fechaExp;
-                fechaIni = resultados.fechaIni;
-                fechaFin = resultados.fechaFin;
+                fechaExp    = resultados.fechaExp;
+                fechaIni    = resultados.fechaIni;
+                fechaFin    = resultados.fechaFin;
                 console.log(`🎉 Descripción obtenida: "${descripcion}"`);
                 console.log(`🎉 Fecha Exp obtenida:   "${fechaExp}"`);
                 console.log(`🎉 Fecha Inicio obtenida:"${fechaIni}"`);
                 console.log(`🎉 Fecha Fin obtenida:   "${fechaFin}"`);
-                await takeSnap('tabla_ok');
+                await takeSnap(targetPage, '03_Tabla_OK');
             } else {
-                console.warn('⚠️ No se encontró ninguna fila con REHABILITACION DE POLIZA');
-                await takeSnap('tabla_sin_rehabilitacion');
+                console.log('⚠️ No se encontró ninguna fila con REHABILITACION DE POLIZA');
+                await takeSnap(targetPage, '04_Tabla_Sin_Rehabilitacion');
             }
+
         } catch (e) {
-            console.error(`❌ Error leyendo tabla lstEndososPoliza: ${e.message}`);
-            await takeSnap('tabla_ERROR');
+            console.log(`⚠️ Error leyendo tabla lstEndososPoliza: ${e.message}`);
+            await takeSnap(targetPage, '05_Tabla_ERROR');
         }
 
-        // ==========================================
-        // 4. FINALIZACIÓN
-        // ==========================================
+        // ── 4. Finalización ──────────────────────────────────────────────────
+        const newWsUrl   = browser.wsEndpoint();
+        const newFinalUrl = targetPage.url();
 
-
-        const newWsUrl = browser.wsEndpoint();
-        const newFinalUrl = popupPage.url();
-
-        // ⚠️ CRÍTICO: Desconectar sin cerrar el browser
         browser.disconnect();
-        clearTimeout(timeoutId);
 
         return [{
             json: {
                 ...item,
                 success: true,
-                nodo: "9.Copiar Datos Nuevos",
-                status: "Copiado Completado",
+                nodo: "9_Copiar_Datos_Nuevos",
+                status: "COPIADO_COMPLETADO",
+                mensaje: "Copia de datos ejecutada exitosamente",
                 wsUrl: newWsUrl,
                 finalUrl: newFinalUrl,
-                descripcion_nueva: descripcion,
-                Panel_endoso_Nuevo: panelEndoso,
-                Fecha_Exp_Nueva: fechaExp,
-                Fecha_Inicio_Nueva: fechaIni,
-                Fecha_Fin_Nueva: fechaFin,
+                descripcion_nueva:    descripcion,
+                Panel_endoso_Nuevo:   panelEndoso,
+                Fecha_Exp_Nueva:      fechaExp,
+                Fecha_Inicio_Nueva:   fechaIni,
+                Fecha_Fin_Nueva:      fechaFin,
                 timestamp: new Date().toISOString()
             },
             binary: screenshots
         }];
 
-    } catch (error) {
-        console.error("❌ Error en ejecución:", error.message);
-        clearTimeout(timeoutId);
-        if (browser) {
-            try {
-                await browser.close();
-            } catch (closeError) {
-                console.error("Error cerrando browser:", closeError.message);
-            }
-        }
+    } catch (e) {
+        console.log(`\n❌ ERROR: ${e.message}`);
+
+        try {
+            await takeSnap(targetPage, "ERROR_final");
+        } catch (_) { }
+
+        if (browser) browser.disconnect();
+
         return [{
             json: {
                 ...item,
                 success: false,
-                nodo: "9.Copiar Datos Nuevos",
+                nodo: "9_Copiar_Datos_Nuevos",
                 status: "ERROR_COPIADO",
-                descripcion_nueva: descripcion,
-                Panel_endoso_Nuevo: panelEndoso,
-                Fecha_Exp_Nueva: fechaExp,
-                Fecha_Inicio_Nueva: fechaIni,
-                Fecha_Fin_Nueva: fechaFin,
-                error: error.message,
-                stack: error.stack,
+                descripcion_nueva:    descripcion,
+                Panel_endoso_Nuevo:   panelEndoso,
+                Fecha_Exp_Nueva:      fechaExp,
+                Fecha_Inicio_Nueva:   fechaIni,
+                Fecha_Fin_Nueva:      fechaFin,
+                error: e.message,
                 timestamp: new Date().toISOString()
             },
             binary: screenshots
