@@ -1,72 +1,71 @@
 const puppeteer = require('puppeteer');
 
-// ==========================================
-// 1. ✏️ VARIABLES DE ENTORNO Y CONFIGURACIÓN
-// ==========================================
+const item = $input.first().json;
 
-const forceClickJS = async (frame, element) => {
-    await frame.evaluate(el => { el.scrollIntoView({ block: "center" }); el.click(); }, element);
+// ══════════════════════════════════════════════════════════════════
+// 🔍 FILTRO: Detectar si la fila debe saltarse
+// ══════════════════════════════════════════════════════════════════
+if (item._SKIP_ROW === true) {
+    console.log(`⏭️ Fila marcada para saltar: ${item._SKIP_REASON || 'Sin razón especificada'}`);
+    return [{ json: item }];
+}
+
+const WS_URL = item.wsUrl;
+const URL_ESPERADA = item.finalUrl;
+
+if (!WS_URL) throw new Error("⛔ No se encontró wsUrl en el input.");
+
+let screenshots = {};
+let step = 1;
+
+const takeSnap = async (pg, name) => {
+    try {
+        await new Promise(r => setTimeout(r, 600));
+        const b64 = await pg.screenshot({ encoding: 'base64', fullPage: false });
+        const fileName = `${step.toString().padStart(2, '0')}_${name}.png`;
+        screenshots[fileName] = {
+            data: b64,
+            mimeType: 'image/png',
+            fileName
+        };
+        step++;
+        console.log(`📸 ${fileName}`);
+    } catch (e) {
+        console.log(`⚠️ Screenshot error: ${e.message}`);
+    }
 };
 
+// =================================================================
+// ⚙️ FUNCIÓN PRINCIPAL (RUN)
+// =================================================================
 async function run() {
-    const item = $input.first().json;
-
-    // ✅ Reconectar al browser que dejó abierto el Nodo 1
-    const wsUrl = item.wsUrl;
-    const finalUrl = item.finalUrl;
-
-    if (!wsUrl) throw new Error("⛔ No se encontró wsUrl en el input. ¿Viene del Nodo 1?");
-
-    let browser;
-    let popupPage;
-    let screenshots = {};
-
-    // ⏱️ Timeout global de 3 minutos
-    const timeoutId = setTimeout(() => {
-        if (browser) {
-            console.error("⏱️ TIMEOUT: Cerrando browser después de 3 minutos");
-            browser.close().catch(() => { });
-        }
-    }, 180000);
-
-    const takeSnap = async (name) => {
-        if (!popupPage) return;
-        try {
-            const shot = await popupPage.screenshot({
-                encoding: 'base64',
-                fullPage: false,
-                type: 'jpeg',
-                quality: 80
-            });
-            screenshots[`${Object.keys(screenshots).length + 1}.${name}`] = {
-                data: shot, mimeType: 'image/jpeg', fileName: `${name}.jpg`
-            };
-        } catch (e) { console.log(`⚠️ Error capturando ${name}: ${e.message}`); }
-    };
+    let browser, targetPage = null;
 
     try {
-        // ✅ Reconectarse al browser existente (NO lanzar uno nuevo)
-        browser = await puppeteer.connect({ browserWSEndpoint: wsUrl });
-        console.log(`✅ Reconectado al browser: ${wsUrl}`);
+        browser = await puppeteer.connect({
+            browserWSEndpoint: WS_URL,
+            defaultViewport: null
+        });
 
-        // ✅ Recuperar la página que dejó abierta el Nodo 1
+        // ── 1. Encontrar la pestaña activa ──────────────────────────────────
+        console.log("🔍 Buscando pestaña activa...");
+
         const pages = await browser.pages();
-        popupPage = pages.find(p => p.url() === finalUrl) || pages[pages.length - 1];
-        await popupPage.bringToFront();
-        console.log(`✅ Página activa: ${popupPage.url()}`);
+        targetPage = pages.find(p => p.url() === URL_ESPERADA) || pages[pages.length - 1];
+        await targetPage.bringToFront();
+        await new Promise(r => setTimeout(r, 1500));
+        console.log(`✅ Conectado a: ${targetPage.url()}`);
 
-        await takeSnap('reconexion');
+        await takeSnap(targetPage, "00_Reconexion");
 
-        // ==========================================
-        // 2. Salir Modificaciones
-        // ==========================================
-
-        // ── Botón 1: por ID fijo
+        // ── 2. Salir Modificaciones — Botón 1 (por ID) ──────────────────────
+        console.log("🔘 Buscando botón Salir Modificaciones...");
         let ventanaAtrapada = false;
-        for (const frame of popupPage.frames()) {
+
+        for (const frame of targetPage.frames()) {
             const btn1 = await frame.$('#frmFiltroModificacion\\:j_idt376').catch(() => null);
             if (btn1) {
-                await forceClickJS(frame, btn1);
+                await frame.evaluate(el => { el.scrollIntoView({ block: "center" }); el.click(); }, btn1);
                 ventanaAtrapada = true;
                 console.log('✅ Click en frmFiltroModificacion:j_idt376');
                 await new Promise(r => setTimeout(r, 2000));
@@ -74,24 +73,24 @@ async function run() {
             }
         }
 
-        // ── Botón 2: por texto/xpath
-        for (const frame of popupPage.frames()) {
+        // ── 3. Salir Modificaciones — Botón 2 (Cancelar por XPath) ──────────
+        console.log("🔘 Buscando botón Cancelar...");
+        for (const frame of targetPage.frames()) {
             const [btn2] = await frame.$x("//input[contains(@value, 'Cancelar')] | //button[contains(., 'Cancelar')]");
             if (btn2) {
-                await forceClickJS(frame, btn2);
+                await frame.evaluate(el => { el.scrollIntoView({ block: "center" }); el.click(); }, btn2);
                 console.log('✅ Click en Cancelar');
                 await new Promise(r => setTimeout(r, 2000));
-                await takeSnap('Cerrar panel endoso')
+                await takeSnap(targetPage, "01_Cerrar_Panel_Endoso");
                 break;
             }
         }
 
         if (ventanaAtrapada) await new Promise(r => setTimeout(r, 5000));
-        await takeSnap('Salir Simon Consultas');
+        await takeSnap(targetPage, "02_Salir_Simon_Consultas");
 
-        // =========================================
-        // 3. Entrar Simon Consultas
-        // =========================================
+        // ── 4. Navegar al menú Consultas ─────────────────────────────────────
+        console.log("🔘 Navegando menú Consultas...");
         await new Promise(r => setTimeout(r, 5000));
 
         const findAndHover = async (pg, txt) => {
@@ -106,39 +105,34 @@ async function run() {
             return null;
         };
 
-        await findAndHover(popupPage, "Consultas Test");
+        await findAndHover(targetPage, "Consultas Test");
         await new Promise(r => setTimeout(r, 1000));
-        const sub = await findAndHover(popupPage, "Polizas Test");
+        const sub = await findAndHover(targetPage, "Polizas Test");
         await new Promise(r => setTimeout(r, 1000));
-        const sob = await findAndHover(popupPage, "Numero poliza - seccion - Riesgo Test");
+        const sob = await findAndHover(targetPage, "Numero poliza - seccion - Riesgo Test");
 
         if (sub) await sub.frame.evaluate(e => e.click(), sub.element);
         if (sob) await sob.frame.evaluate(e => e.click(), sob.element);
 
         await new Promise(r => setTimeout(r, 500));
-        await takeSnap('Menu Consultas')
+        await takeSnap(targetPage, "03_Menu_Consultas");
 
+        // ── 5. Finalización ──────────────────────────────────────────────────
         await new Promise(r => setTimeout(r, 4000));
-        await takeSnap('Resultado Final')
-
-        // ==========================================
-        // 4. FINALIZACIÓN
-        // ==========================================
-        await new Promise(r => setTimeout(r, 500));
+        await takeSnap(targetPage, "04_Resultado_Final");
 
         const newWsUrl = browser.wsEndpoint();
-        const newFinalUrl = popupPage.url();
+        const newFinalUrl = targetPage.url();
 
-        // ⚠️ CRÍTICO: Desconectar sin cerrar el browser
         browser.disconnect();
-        clearTimeout(timeoutId);
 
         return [{
             json: {
                 ...item,
                 success: true,
-                nodo: "7.Navegacion Consultas",
-                status: "Navegacion Completada",
+                nodo: "7_Navegacion_Consultas",
+                status: "NAVEGACION_COMPLETADA",
+                mensaje: "Navegación a Consultas ejecutada exitosamente",
                 wsUrl: newWsUrl,
                 finalUrl: newFinalUrl,
                 reinicio_forzado: ventanaAtrapada,
@@ -147,24 +141,22 @@ async function run() {
             binary: screenshots
         }];
 
-    } catch (error) {
-        console.error("❌ Error en ejecución:", error.message);
-        clearTimeout(timeoutId);
-        if (browser) {
-            try {
-                await browser.close();
-            } catch (closeError) {
-                console.error("Error cerrando browser:", closeError.message);
-            }
-        }
+    } catch (e) {
+        console.log(`\n❌ ERROR: ${e.message}`);
+
+        try {
+            await takeSnap(targetPage, "ERROR_final");
+        } catch (_) { }
+
+        if (browser) browser.disconnect();
+
         return [{
             json: {
                 ...item,
                 success: false,
-                nodo: "7.Navegacion Consultas",
+                nodo: "7_Navegacion_Consultas",
                 status: "ERROR_NAVEGACION",
-                error: error.message,
-                stack: error.stack,
+                error: e.message,
                 timestamp: new Date().toISOString()
             },
             binary: screenshots
